@@ -1,0 +1,11 @@
+# ROM images are never committed (copyright + they're the immutable input, not source)
+*.sfc
+*.smc
+*.swc
+*.fig
+*.bs
+*.st
+# scratch
+_*.sfc
+__pycache__/
+*.pyc
