@@ -11,14 +11,24 @@ every offset and rule traces to a wiki page, nothing is written from memory.
 
 ## Tools (`tools/`, stdlib-only, run with `py -3`)
 
-| Tool | What it does |
-|------|--------------|
-| `header_parse.py <rom>` | Auto-detects LoROM/HiROM/ExHiROM by scoring the checksum-complement identity + map-mode byte + title, then dumps the header (title, chipset, sizes, checksum, **RESET vector = entry point**). |
-| `mapper.py` | Library: `cpu_to_file` / `file_to_cpu` for LoROM & HiROM, copier-header (.smc) stripping. Importable by downstream disassembly. |
+Two layers, mirroring the NES side (generic CPU decoder + cart wiring):
+
+| Tool | Layer | What it does |
+|------|-------|--------------|
+| `w65c816.py` | **CPU (65C816)** | Pure instruction decoder: the 256-opcode WDC matrix + `decode()` with **M/X flag width tracking** (immediate length depends on runtime REP/SEP state). **Zero SNES imports** — the 65C816 analog of the NES `disasm6502`; graduates to its own repo the moment a second 65C816 system needs it. `py -3 tools/w65c816.py` runs the selftest. |
+| `disasm65816.py` | **SNES** | Thin driver: loads a ROM, detects the mapping, translates flat file offsets ↔ `(bank,addr)` via `mapper`, and streams `w65c816.decode()`. |
+| `header_parse.py` | SNES | Auto-detects LoROM/HiROM/ExHiROM (checksum-complement identity + map-mode byte + title), dumps the header incl. **RESET vector = entry point**. |
+| `mapper.py` | SNES | `cpu_to_file` / `file_to_cpu` for LoROM & HiROM + copier-header (.smc) stripping. |
 
 ```
-py -3 tools/header_parse.py path/to/game.sfc
+py -3 tools/header_parse.py  game.sfc
+py -3 tools/disasm65816.py   game.sfc                 # disassemble from RESET
+py -3 tools/disasm65816.py   game.sfc --start 01:CD51 -n 30 --mx 8,8
 ```
+
+The opcode table is cross-checked against 6502.org's 65c816opcodes reference, and
+the decoder is verified end-to-end by disassembling a real cart's reset vector into
+the canonical SNES boot sequence (CLC/XCE/SEI/REP/SEP + PPU/DMA register init).
 
 ## The teardown method
 

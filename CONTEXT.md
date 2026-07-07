@@ -19,8 +19,18 @@ teardown method. It's deliberately target-agnostic; a specific game imports it.
 ## Current state
 
 - ✅ `mapper.py` — LoROM/HiROM/ExHiROM offset↔address, copier-header stripping. Self-tested.
-- ✅ `header_parse.py` — mapping auto-detect + full header dump + RESET entry point. Self-tested against a synthetic LoROM.
-- ⬜ **No target ROM chosen.** Next real work begins when one is.
+- ✅ `header_parse.py` — mapping auto-detect + full header dump + RESET entry point. Validated on a real cart.
+- ✅ `w65c816.py` — **CPU-level** 65C816 decoder (256-opcode matrix + M/X width tracking). System-agnostic, zero SNES imports; the 65C816 analog of the NES `disasm6502`. Cross-checked vs 6502.org + selftest.
+- ✅ `disasm65816.py` — **SNES-level** driver wiring `w65c816` to `mapper`. Verified end-to-end: decodes a real cart's RESET into the canonical boot sequence with correct M/X-dependent immediate lengths.
+- ✅ **First target = `rot3k2-snes-decompiler`** (ROTK2 SNES). See that repo.
+
+## Layering (why two files)
+
+The CPU decoder (`w65c816.py`) knows the 65C816 and nothing else; the SNES wiring
+(`disasm65816.py`, `mapper.py`, `header_parse.py`) is separate. Same split as the
+NES side (generic `disasm6502` vs cart-specific tooling). Per the project SDK, a
+shared lib is factored into its own repo **when a second consumer appears** — until
+then `w65c816.py` stays here as a clean, dependency-free, graduation-ready module.
 
 ## Next steps (when a target lands)
 
