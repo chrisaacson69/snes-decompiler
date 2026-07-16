@@ -27,7 +27,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mapper import cpu_to_file, strip_copier_header, LOROM
+from mapper import cpu_to_file, strip_copier_header, LOROM, HIROM, EXHIROM
 from header_parse import detect
 import w65c816
 
@@ -60,9 +60,18 @@ class AddressSpace:
             f = seg.resolve(bank, addr)
             if f is not None:
                 return f if f < len(self.rom) else None
-        if self.mapping == LOROM and (bank & 0x7F) <= 0x7D and addr >= 0x8000:
-            f = cpu_to_file(LOROM, bank, addr)
-            return f if f < len(self.rom) else None
+        m = self.mapping
+        if m == LOROM:
+            if (bank & 0x7F) <= 0x7D and addr >= 0x8000:
+                f = cpu_to_file(LOROM, bank, addr)
+                return f if f < len(self.rom) else None
+        elif m in (HIROM, EXHIROM):
+            b = bank & 0x7F                      # fold the $80 FastROM mirror
+            full = (0x40 <= b <= 0x7D)           # $40-$7D and $C0-$FF: whole 64K bank is ROM
+            mirror = (b <= 0x3F and addr >= 0x8000)  # $00-$3F/$80-$BF:$8000-$FFFF upper-half mirror
+            if full or mirror:
+                f = cpu_to_file(m, bank, addr)
+                return f if f < len(self.rom) else None
         return None                              # RAM / registers / unmapped
 
 
