@@ -97,12 +97,14 @@ def push_bytes(ins):
 
 
 class Decomp:
-    def __init__(self, rom, mapping, bank, entry, m8=False, x8=False, syscalls=None, labels=None, wram=None):
+    def __init__(self, rom, mapping, bank, entry, m8=False, x8=False, syscalls=None, labels=None, wram=None, param_types=None):
         self.rom, self.mapping, self.bank, self.entry = rom, mapping, bank, entry
         self.m8_0, self.x8_0 = m8, x8
         self.syscalls = syscalls or {}
         self.labels = labels or {}
         self.wram = wram or {}
+        self.param_types = param_types or {}   # arg-index -> field map (inter-procedural seed)
+        self.arg_hints = []                    # (callee_bank, callee_addr, argidx, field_map) from call sites
         from mapper import cpu_to_file
         self.c2f = lambda a: cpu_to_file(mapping, bank, a)
         self.ins = {}          # addr -> decoded instruction
@@ -289,7 +291,8 @@ class Decomp:
         delta = ed[L]; pushed = []; out = []; cmp = None; cond = None
         pending = 0                                    # trailing PLA cleanup words owed by a call
         ptype = {}                                     # dp-slot -> record field map (pointer provenance)
-        regA_slot = None                               # if regA == "dp_NN", its slot number (for copy propagation)
+        regA_type = None                               # field map if regA holds a typed record pointer
+        pushed_types = []                              # parallel to `pushed`: each entry's field map (or None)
         addrs = self.block_addrs(L)
         i = 0
         while i < len(addrs):
@@ -335,41 +338,51 @@ class Decomp:
                 delta += push_bytes(d); pending -= 1; i += 1; continue   # call-arg cleanup
             pending = 0
             if mn == "LDA":
-                regA = mem(); regA_slot = (val & 0xFF) if mode == "dp" else None
+                regA = mem()
+                if mode == "dp": regA_type = ptype.get(val & 0xFF)
+                elif mode == "sr":                      # arg load: type from the param registry
+                    eo = val - delta
+                    regA_type = self.param_types.get((eo - 4)//2) if eo >= 4 and eo % 2 == 0 else None
+                else: regA_type = None
             elif mn == "LDX": regX = mem()
             elif mn == "LDY": regY = mem()
             elif mn == "STA":
                 out.append("%s = %s;" % (mem(), regA))
                 if mode == "dp":                        # propagate record-pointer type through copies
                     ts = val & 0xFF
-                    if regA_slot is not None and regA_slot in ptype: ptype[ts] = ptype[regA_slot]
+                    if regA_type is not None: ptype[ts] = regA_type
                     else: ptype.pop(ts, None)
             elif mn == "STX": out.append("%s = %s;" % (mem(), regX))
             elif mn == "STY": out.append("%s = %s;" % (mem(), regY))
             elif mn == "STZ": out.append("%s = 0;" % mem())
             elif mn in ("PHA","PHX","PHY","PEA","PEI"):
-                e = ("0x%X" % val) if mn in ("PEA","PEI") else {"PHA":regA,"PHX":regX,"PHY":regY}[mn]
-                pushed.append(e); delta += push_bytes(d)
+                if mn == "PEI":                         # push the VALUE at dp_nn (not the address)
+                    e = "dp_%02X" % (val & 0xFF); pty = ptype.get(val & 0xFF)
+                elif mn == "PEA":
+                    e = "0x%X" % val; pty = None
+                else:
+                    e = {"PHA":regA,"PHX":regX,"PHY":regY}[mn]; pty = regA_type if mn == "PHA" else None
+                pushed.append(e); pushed_types.append(pty); delta += push_bytes(d)
             elif mn in ("PLA","PLX","PLY"):
                 delta += push_bytes(d)
-                if pushed: pushed.pop()
+                if pushed: pushed.pop(); pushed_types.pop()
             elif mn in ("INC","INA"):
-                if mode == "acc" or mn == "INA": regA = "(%s + 1)" % regA; regA_slot = None
+                if mode == "acc" or mn == "INA": regA = "(%s + 1)" % regA; regA_type = None
                 else: out.append("%s = %s + 1;" % (mem(), mem()))
             elif mn in ("DEC","DEA"):
-                if mode == "acc" or mn == "DEA": regA = "(%s - 1)" % regA; regA_slot = None
+                if mode == "acc" or mn == "DEA": regA = "(%s - 1)" % regA; regA_type = None
                 else: out.append("%s = %s - 1;" % (mem(), mem()))
-            elif mn == "ADC": regA = "(%s + %s)" % (regA, mem()); regA_slot = None
-            elif mn == "SBC": regA = "(%s - %s)" % (regA, mem()); regA_slot = None
-            elif mn == "AND": regA = "(%s & %s)" % (regA, mem()); regA_slot = None
-            elif mn == "ORA": regA = "(%s | %s)" % (regA, mem()); regA_slot = None
-            elif mn == "EOR": regA = "(%s ^ %s)" % (regA, mem()); regA_slot = None
-            elif mn == "ASL": regA = "(%s << 1)" % regA; regA_slot = None
-            elif mn == "LSR": regA = "(%s >> 1)" % regA; regA_slot = None
+            elif mn == "ADC": regA = "(%s + %s)" % (regA, mem()); regA_type = None
+            elif mn == "SBC": regA = "(%s - %s)" % (regA, mem()); regA_type = None
+            elif mn == "AND": regA = "(%s & %s)" % (regA, mem()); regA_type = None
+            elif mn == "ORA": regA = "(%s | %s)" % (regA, mem()); regA_type = None
+            elif mn == "EOR": regA = "(%s ^ %s)" % (regA, mem()); regA_type = None
+            elif mn == "ASL": regA = "(%s << 1)" % regA; regA_type = None
+            elif mn == "LSR": regA = "(%s >> 1)" % regA; regA_type = None
             elif mn == "TAX": regX = regA
             elif mn == "TAY": regY = regA
-            elif mn == "TXA": regA = regX; regA_slot = None
-            elif mn == "TYA": regA = regY; regA_slot = None
+            elif mn == "TXA": regA = regX; regA_type = None
+            elif mn == "TYA": regA = regY; regA_type = None
             elif mn == "CMP": cmp = (regA, mem())
             elif mn == "CPX": cmp = (regX, mem())
             elif mn == "CPY": cmp = (regY, mem())
@@ -385,7 +398,12 @@ class Decomp:
                 elif i + 1 < len(addrs):                 # bulk SP-adjust cleanup?
                     chg, cons = self.sp_effect(addrs, i + 1)
                     if cons == 4 and chg < 0: argc = (-chg) // 2
+                if tgt and argc:                         # record record-pointer args -> callee param types
+                    for k in range(argc):
+                        if k < len(pushed_types) and pushed_types[-(k+1)] is not None:
+                            self.arg_hints.append((tgt[0], tgt[1], k, pushed_types[-(k+1)]))
                 args = self.call_args(pushed, argc)
+                pushed_types[:] = pushed_types[:len(pushed)]   # keep aligned with `pushed`
                 if tgt and (tgt[0] << 16 | tgt[1]) == (0xC0 << 16 | ABI) and args:
                     sid = args[0]; rest = ", ".join(args[1:])
                     sidn = int(sid, 16) if isinstance(sid, str) and sid.startswith("0x") else None
@@ -395,7 +413,7 @@ class Decomp:
                     lbl = self.labels.get((tgt[0] << 16) | tgt[1]) if tgt else None
                     nm = lbl or ("sub_%02X%04X" % (tgt[0], tgt[1]) if tgt else "(*%s)" % regA)
                     call = "%s(%s)" % (nm, ", ".join(args))
-                out.append(call + ";"); regA = "ret"; regA_slot = None
+                out.append(call + ";"); regA = "ret"; regA_type = None
                 _fm = RECORD_ACCESSORS.get(nm)          # accessor returns record ptr in dp_00
                 if _fm is not None: ptype[0x00] = _fm
             elif mn in COND:
