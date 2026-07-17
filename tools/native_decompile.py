@@ -21,11 +21,17 @@ per-instruction statement lift below is 65816-specific).
     py -3 tools/native_decompile.py <rom> --start C3:56B1
     py -3 tools/native_decompile.py <rom> --start C1:0987 --asm   # + raw disasm
 """
-import argparse, os, sys
+import argparse, os, sys, re
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 from mapper import strip_copier_header
 from header_parse import detect
 import w65c816
+
+# Record struct field maps, keyed by the accessor routine that returns the pointer
+# (accessor = base + index*stride). Lets [dp],Y accesses self-label: dp_24[0x8] -> dp_24.output.
+FIEF_FIELDS = {0:"gold",2:"debt",4:"town",6:"rice",8:"output",10:"dams",12:"loyalty",
+               14:"wealth",16:"men",18:"morale",20:"skill",22:"arms",24:"header"}
+RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS}   # the 26-byte fief/daimyo record
 
 RET   = {"RTS", "RTL", "RTI", "STP"}
 CALL  = {"JSR", "JSL"}
@@ -271,6 +277,8 @@ class Decomp:
         regA, regX, regY = "a", "x", "y"
         delta = ed[L]; pushed = []; out = []; cmp = None; cond = None
         pending = 0                                    # trailing PLA cleanup words owed by a call
+        ptype = {}                                     # dp-slot -> record field map (pointer provenance)
+        regA_slot = None                               # if regA == "dp_NN", its slot number (for copy propagation)
         addrs = self.block_addrs(L)
         i = 0
         while i < len(addrs):
@@ -286,7 +294,14 @@ class Decomp:
                 if mode == "imm_m" or mode == "imm_x":
                     return "0x%X" % val
                 if mode in ("idy","idly"):        # (dp),Y / [dp],Y — Y carries the field offset
-                    return "dp_%02X[%s]" % (val & 0xFF, regY)
+                    slot = val & 0xFF
+                    fm = ptype.get(slot)
+                    if fm is not None:
+                        m = re.match(r"0x([0-9A-Fa-f]+)$", regY)
+                        if m:
+                            fld = fm.get(int(m.group(1), 16))
+                            if fld: return "dp_%02X.%s" % (slot, fld)
+                    return "dp_%02X[%s]" % (slot, regY)
                 if mode == "dpy":                 # dp,Y — direct-page indexed
                     return "dp_%02X[%s]" % (val & 0xFF, regY)
                 if mode == "dpx":                 # dp,X — direct-page indexed
@@ -308,10 +323,16 @@ class Decomp:
             if mn in ("PLA", "PLX", "PLY") and pending > 0:
                 delta += push_bytes(d); pending -= 1; i += 1; continue   # call-arg cleanup
             pending = 0
-            if mn == "LDA": regA = mem()
+            if mn == "LDA":
+                regA = mem(); regA_slot = (val & 0xFF) if mode == "dp" else None
             elif mn == "LDX": regX = mem()
             elif mn == "LDY": regY = mem()
-            elif mn == "STA": out.append("%s = %s;" % (mem(), regA))
+            elif mn == "STA":
+                out.append("%s = %s;" % (mem(), regA))
+                if mode == "dp":                        # propagate record-pointer type through copies
+                    ts = val & 0xFF
+                    if regA_slot is not None and regA_slot in ptype: ptype[ts] = ptype[regA_slot]
+                    else: ptype.pop(ts, None)
             elif mn == "STX": out.append("%s = %s;" % (mem(), regX))
             elif mn == "STY": out.append("%s = %s;" % (mem(), regY))
             elif mn == "STZ": out.append("%s = 0;" % mem())
@@ -322,22 +343,22 @@ class Decomp:
                 delta += push_bytes(d)
                 if pushed: pushed.pop()
             elif mn in ("INC","INA"):
-                if mode == "acc" or mn == "INA": regA = "(%s + 1)" % regA
+                if mode == "acc" or mn == "INA": regA = "(%s + 1)" % regA; regA_slot = None
                 else: out.append("%s = %s + 1;" % (mem(), mem()))
             elif mn in ("DEC","DEA"):
-                if mode == "acc" or mn == "DEA": regA = "(%s - 1)" % regA
+                if mode == "acc" or mn == "DEA": regA = "(%s - 1)" % regA; regA_slot = None
                 else: out.append("%s = %s - 1;" % (mem(), mem()))
-            elif mn == "ADC": regA = "(%s + %s)" % (regA, mem())
-            elif mn == "SBC": regA = "(%s - %s)" % (regA, mem())
-            elif mn == "AND": regA = "(%s & %s)" % (regA, mem())
-            elif mn == "ORA": regA = "(%s | %s)" % (regA, mem())
-            elif mn == "EOR": regA = "(%s ^ %s)" % (regA, mem())
-            elif mn == "ASL": regA = "(%s << 1)" % regA
-            elif mn == "LSR": regA = "(%s >> 1)" % regA
+            elif mn == "ADC": regA = "(%s + %s)" % (regA, mem()); regA_slot = None
+            elif mn == "SBC": regA = "(%s - %s)" % (regA, mem()); regA_slot = None
+            elif mn == "AND": regA = "(%s & %s)" % (regA, mem()); regA_slot = None
+            elif mn == "ORA": regA = "(%s | %s)" % (regA, mem()); regA_slot = None
+            elif mn == "EOR": regA = "(%s ^ %s)" % (regA, mem()); regA_slot = None
+            elif mn == "ASL": regA = "(%s << 1)" % regA; regA_slot = None
+            elif mn == "LSR": regA = "(%s >> 1)" % regA; regA_slot = None
             elif mn == "TAX": regX = regA
             elif mn == "TAY": regY = regA
-            elif mn == "TXA": regA = regX
-            elif mn == "TYA": regA = regY
+            elif mn == "TXA": regA = regX; regA_slot = None
+            elif mn == "TYA": regA = regY; regA_slot = None
             elif mn == "CMP": cmp = (regA, mem())
             elif mn == "CPX": cmp = (regX, mem())
             elif mn == "CPY": cmp = (regY, mem())
@@ -363,7 +384,9 @@ class Decomp:
                     lbl = self.labels.get((tgt[0] << 16) | tgt[1]) if tgt else None
                     nm = lbl or ("sub_%02X%04X" % (tgt[0], tgt[1]) if tgt else "(*%s)" % regA)
                     call = "%s(%s)" % (nm, ", ".join(args))
-                out.append(call + ";"); regA = "ret"
+                out.append(call + ";"); regA = "ret"; regA_slot = None
+                _fm = RECORD_ACCESSORS.get(nm)          # accessor returns record ptr in dp_00
+                if _fm is not None: ptype[0x00] = _fm
             elif mn in COND:
                 if cmp: cond = self.cond_expr(mn, cmp[0], cmp[1])
                 else:   cond = self.cond_expr(mn, regA, "0")
