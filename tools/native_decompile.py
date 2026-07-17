@@ -286,11 +286,11 @@ class Decomp:
                 merged.append(raw[k]); k += 1
         return list(reversed(merged))                              # cdecl: source order
 
-    def block_stmts(self, L, ed):
+    def block_stmts(self, L, ed, ptype_in=None, collect_hints=True):
         regA, regX, regY = "a", "x", "y"
         delta = ed[L]; pushed = []; out = []; cmp = None; cond = None
         pending = 0                                    # trailing PLA cleanup words owed by a call
-        ptype = {}                                     # dp-slot -> record field map (pointer provenance)
+        ptype = dict(ptype_in or {})                   # dp-slot -> record field map (cross-block IN state)
         regA_type = None                               # field map if regA holds a typed record pointer
         pushed_types = []                              # parallel to `pushed`: each entry's field map (or None)
         addrs = self.block_addrs(L)
@@ -398,7 +398,7 @@ class Decomp:
                 elif i + 1 < len(addrs):                 # bulk SP-adjust cleanup?
                     chg, cons = self.sp_effect(addrs, i + 1)
                     if cons == 4 and chg < 0: argc = (-chg) // 2
-                if tgt and argc:                         # record record-pointer args -> callee param types
+                if collect_hints and tgt and argc:       # record record-pointer args -> callee param types
                     for k in range(argc):
                         if k < len(pushed_types) and pushed_types[-(k+1)] is not None:
                             self.arg_hints.append((tgt[0], tgt[1], k, pushed_types[-(k+1)]))
@@ -414,6 +414,7 @@ class Decomp:
                     nm = lbl or ("sub_%02X%04X" % (tgt[0], tgt[1]) if tgt else "(*%s)" % regA)
                     call = "%s(%s)" % (nm, ", ".join(args))
                 out.append(call + ";"); regA = "ret"; regA_type = None
+                for _k in [k for k in ptype if k < 0x20]: del ptype[_k]  # calls clobber dp scratch <$20
                 _fm = RECORD_ACCESSORS.get(nm)          # accessor returns record ptr in dp_00
                 if _fm is not None: ptype[0x00] = _fm
             elif mn in COND:
@@ -426,12 +427,43 @@ class Decomp:
             else:
                 out.append("/* %s %s */" % (mn, d["text"]))
             i += 1
-        return out, (cond or "cc")
+        return out, (cond or "cc"), ptype
+
+    def compute_ptype_flow(self, ed):
+        """Forward dataflow to a fixpoint: IN[b] = intersection(OUT[preds]), OUT[b] =
+        transfer(IN[b]).  Meet = intersection (a slot is typed T only if ALL preds agree),
+        which keeps the labeling sound.  Returns {leader: IN ptype}."""
+        order = [L for L in self.leaders if L in ed]   # reachable blocks only (ed = entry_delta BFS)
+        rset = set(order)
+        IN = {L: {} for L in order}; OUT = {L: {} for L in order}
+        work = list(order); inq = set(order)
+        guard = 0
+        while work and guard < 40 * (len(order) + 1):
+            guard += 1
+            L = work.pop(0); inq.discard(L)
+            preds = [p for p in self.preds.get(L, []) if p in rset]
+            if preds:
+                nin = None
+                for p in preds:
+                    op = OUT[p]
+                    if nin is None: nin = dict(op)
+                    else: nin = {k: v for k, v in nin.items() if op.get(k) == v}
+            else:
+                nin = {}
+            IN[L] = nin
+            _, _, nout = self.block_stmts(L, ed, ptype_in=nin, collect_hints=False)
+            if nout != OUT[L]:
+                OUT[L] = nout
+                for s in self.bsucc.get(L, []):
+                    if s in rset and s not in inq: work.append(s); inq.add(s)
+        return IN
 
 
 def emit_c(dc, out=sys.stdout):
     dc.local_names = {}
+    dc.arg_hints = []
     ed = dc.entry_delta()
+    dc._ptype_in = dc.compute_ptype_flow(ed)          # cross-block pointer provenance (fixpoint)
     printed = set()
 
     def follow_of(L):
@@ -458,7 +490,7 @@ def emit_c(dc, out=sys.stdout):
             # loop header?
             if L in dc.loops:
                 body = dc.loops[L]
-                stmts, cond = dc.block_stmts(L, ed)
+                stmts, cond, _ = dc.block_stmts(L, ed, ptype_in=dc._ptype_in.get(L))
                 out.write(pad + "L%04X: while (1) {\n" % L)
                 for st in stmts: out.write(pad + "    " + st + "\n")
                 s = dc.bsucc[L]
@@ -475,7 +507,7 @@ def emit_c(dc, out=sys.stdout):
                 else:
                     emit(s[0] if s else None, L, ind + 1)
                     out.write(pad + "}\n"); return
-            stmts, cond = dc.block_stmts(L, ed)
+            stmts, cond, _ = dc.block_stmts(L, ed, ptype_in=dc._ptype_in.get(L))
             for st in stmts:
                 if not st.startswith("return"): out.write(pad + st + "\n")
             if any(st.startswith("return") for st in stmts):
