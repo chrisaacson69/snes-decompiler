@@ -32,6 +32,17 @@ import w65c816
 FIEF_FIELDS = {0:"gold",2:"debt",4:"town",6:"rice",8:"output",10:"dams",12:"loyalty",
                14:"wealth",16:"men",18:"morale",20:"skill",22:"arms",24:"header"}
 RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS}   # the 26-byte fief/daimyo record
+RECORD_STRUCTS = {"rec_7E33D5": ("FiefRecord", 26,
+                  "fief/daimyo record; base $7E33D5, stride 26 (rec_7E33D5(idx))")}
+
+def emit_struct_defs(out=sys.stdout):
+    """Emit C typedefs for the known record layouts — the accessors return these."""
+    for acc, fm in RECORD_ACCESSORS.items():
+        nm, size, note = RECORD_STRUCTS.get(acc, (acc, 0, ""))
+        out.write("typedef struct {  /* %d bytes; %s */\n" % (size, note))
+        for off in sorted(fm):
+            out.write("    int16_t %-8s /* +%d */\n" % (fm[off] + ";", off))
+        out.write("} %s;   /* returned by %s */\n\n" % (nm, acc))
 
 RET   = {"RTS", "RTL", "RTI", "STP"}
 CALL  = {"JSR", "JSL"}
