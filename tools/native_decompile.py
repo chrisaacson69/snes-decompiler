@@ -285,9 +285,19 @@ class Decomp:
                     return self.frame_name(val - delta)
                 if mode == "imm_m" or mode == "imm_x":
                     return "0x%X" % val
-                if mode in ("dp","dpx","dpy","idp","idx","idy","idl","idly"):
+                if mode in ("idy","idly"):        # (dp),Y / [dp],Y — Y carries the field offset
+                    return "dp_%02X[%s]" % (val & 0xFF, regY)
+                if mode == "dpy":                 # dp,Y — direct-page indexed
+                    return "dp_%02X[%s]" % (val & 0xFF, regY)
+                if mode == "dpx":                 # dp,X — direct-page indexed
+                    return "dp_%02X[%s]" % (val & 0xFF, regX)
+                if mode in ("dp","idp","idx","idl"):
                     return "dp_%02X" % (val & 0xFF)
-                if mode in ("abs","abx","aby"):
+                if mode == "abx":
+                    return (self.wram.get(val) or "M_%04X" % val) + "[%s]" % regX
+                if mode == "aby":
+                    return (self.wram.get(val) or "M_%04X" % val) + "[%s]" % regY
+                if mode == "abs":
                     return self.wram.get(val) or ("M_%04X" % val)
                 if mode in ("abl","alx"):
                     if (val >> 16) in (0x7E, 0x7F):
