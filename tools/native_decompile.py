@@ -34,7 +34,8 @@ FIEF_FIELDS = {0:"gold",2:"debt",4:"town",6:"rice",8:"output",10:"dams",12:"loya
 # DaimyoRecord: byte fields, base $7E:2F79, stride 8 (rec_7E2F79 = mul32_b(id,3) = id<<3 = id*8).
 # WRAM-dump + on-screen oracle confirmed (Oda/Shingen/Kenshin elite; player = rolled char).
 DAIMYO_FIELDS = {0:"age",1:"health",2:"drive",3:"luck",4:"charisma",5:"intel"}
-RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS, "rec_7E2F79": DAIMYO_FIELDS}
+RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS, "rec_7E2F79": DAIMYO_FIELDS,
+                    "idx_315B_2F79": DAIMYO_FIELDS}   # wraps rec_7E2F79 (via the $315B owner map)
 RECORD_STRUCTS = {"rec_7E33D5": ("FiefRecord", 26,
                   "fief record; base $7E33D5, stride 26 (rec_7E33D5, mul32_a linear)"),
                   "rec_7E2F79": ("DaimyoRecord", 8,
@@ -320,11 +321,12 @@ class Decomp:
                     return "0x%X" % val
                 if mode in ("idy","idly"):        # (dp),Y / [dp],Y — Y carries the field offset
                     slot = val & 0xFF
-                    fm = ptype.get(slot)
-                    if fm is not None:
+                    t = ptype.get(slot)
+                    if t is not None:
+                        fm, base = t                  # (field map, base offset into the record)
                         m = re.match(r"0x([0-9A-Fa-f]+)$", regY)
                         if m:
-                            fld = fm.get(int(m.group(1), 16))
+                            fld = fm.get(base + int(m.group(1), 16))
                             if fld: return "dp_%02X.%s" % (slot, fld)
                     return "dp_%02X[%s]" % (slot, regY)
                 if mode == "dpy":                 # dp,Y — direct-page indexed
@@ -353,7 +355,8 @@ class Decomp:
                 if mode == "dp": regA_type = ptype.get(val & 0xFF)
                 elif mode == "sr":                      # arg load: type from the param registry
                     eo = val - delta
-                    regA_type = self.param_types.get((eo - 4)//2) if eo >= 4 and eo % 2 == 0 else None
+                    _fm = self.param_types.get((eo - 4)//2) if eo >= 4 and eo % 2 == 0 else None
+                    regA_type = (_fm, 0) if _fm else None
                 else: regA_type = None
             elif mn == "LDX": regX = mem()
             elif mn == "LDY": regY = mem()
@@ -384,8 +387,12 @@ class Decomp:
             elif mn in ("DEC","DEA"):
                 if mode == "acc" or mn == "DEA": regA = "(%s - 1)" % regA; regA_type = None
                 else: out.append("%s = %s - 1;" % (mem(), mem()))
-            elif mn == "ADC": regA = "(%s + %s)" % (regA, mem()); regA_type = None
-            elif mn == "SBC": regA = "(%s - %s)" % (regA, mem()); regA_type = None
+            elif mn == "ADC":
+                regA = "(%s + %s)" % (regA, mem())
+                regA_type = (regA_type[0], regA_type[1] + val) if (regA_type is not None and mode == "imm_m") else None
+            elif mn == "SBC":
+                regA = "(%s - %s)" % (regA, mem())
+                regA_type = (regA_type[0], regA_type[1] - val) if (regA_type is not None and mode == "imm_m") else None
             elif mn == "AND": regA = "(%s & %s)" % (regA, mem()); regA_type = None
             elif mn == "ORA": regA = "(%s | %s)" % (regA, mem()); regA_type = None
             elif mn == "EOR": regA = "(%s ^ %s)" % (regA, mem()); regA_type = None
@@ -410,10 +417,11 @@ class Decomp:
                 elif i + 1 < len(addrs):                 # bulk SP-adjust cleanup?
                     chg, cons = self.sp_effect(addrs, i + 1)
                     if cons == 4 and chg < 0: argc = (-chg) // 2
-                if collect_hints and tgt and argc:       # record record-pointer args -> callee param types
+                if collect_hints and tgt and argc:       # record base-pointer args -> callee param types
                     for k in range(argc):
-                        if k < len(pushed_types) and pushed_types[-(k+1)] is not None:
-                            self.arg_hints.append((tgt[0], tgt[1], k, pushed_types[-(k+1)]))
+                        pt = pushed_types[-(k+1)] if k < len(pushed_types) else None
+                        if pt is not None and pt[1] == 0:   # only a record base (offset 0) is a clean param type
+                            self.arg_hints.append((tgt[0], tgt[1], k, pt[0]))
                 args = self.call_args(pushed, argc)
                 pushed_types[:] = pushed_types[:len(pushed)]   # keep aligned with `pushed`
                 if tgt and (tgt[0] << 16 | tgt[1]) == (0xC0 << 16 | ABI) and args:
@@ -440,12 +448,12 @@ class Decomp:
                     call = "dp_00 = &%s[%s]" % (sname, idx)
                     out.append(call + "; /* %s + (%s) */" % (base, step)); regA = "ret"; regA_type = None
                     for _k in [k for k in ptype if k < 0x20]: del ptype[_k]
-                    if bi in BASE_TO_STRUCT: ptype[0x00] = BASE_TO_STRUCT[bi][1]
+                    if bi in BASE_TO_STRUCT: ptype[0x00] = (BASE_TO_STRUCT[bi][1], 0)
                     i += 1; continue
                 out.append(call + ";"); regA = "ret"; regA_type = None
                 for _k in [k for k in ptype if k < 0x20]: del ptype[_k]  # calls clobber dp scratch <$20
                 _fm = RECORD_ACCESSORS.get(nm)          # accessor returns record ptr in dp_00
-                if _fm is not None: ptype[0x00] = _fm
+                if _fm is not None: ptype[0x00] = (_fm, 0)
             elif mn in COND:
                 if cmp: cond = self.cond_expr(mn, cmp[0], cmp[1])
                 else:   cond = self.cond_expr(mn, regA, "0")
