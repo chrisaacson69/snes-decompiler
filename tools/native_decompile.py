@@ -39,6 +39,8 @@ RECORD_STRUCTS = {"rec_7E33D5": ("FiefRecord", 26,
                   "fief record; base $7E33D5, stride 26 (rec_7E33D5, mul32_a linear)"),
                   "rec_7E2F79": ("DaimyoRecord", 8,
                   "daimyo attributes; base $7E2F79, stride 8 (rec_7E2F79, mul32_b shift-3=x8)")}
+# base WRAM offset -> (struct name, field map) — so inline mul32 record computations self-type
+BASE_TO_STRUCT = {0x33D5: ("FiefRecord", FIEF_FIELDS), 0x2F79: ("DaimyoRecord", DAIMYO_FIELDS)}
 
 def emit_struct_defs(out=sys.stdout):
     """Emit C typedefs for the known record layouts — the accessors return these."""
@@ -301,6 +303,7 @@ class Decomp:
         ptype = dict(ptype_in or {})                   # dp-slot -> record field map (cross-block IN state)
         regA_type = None                               # field map if regA holds a typed record pointer
         pushed_types = []                              # parallel to `pushed`: each entry's field map (or None)
+        dp_vals = {}                                   # dp-slot -> last literal value (for the mul32 idiom)
         addrs = self.block_addrs(L)
         i = 0
         while i < len(addrs):
@@ -360,6 +363,7 @@ class Decomp:
                     ts = val & 0xFF
                     if regA_type is not None: ptype[ts] = regA_type
                     else: ptype.pop(ts, None)
+                    dp_vals[ts] = regA                  # track for the mul32 record-pointer idiom
             elif mn == "STX": out.append("%s = %s;" % (mem(), regX))
             elif mn == "STY": out.append("%s = %s;" % (mem(), regY))
             elif mn == "STZ": out.append("%s = 0;" % mem())
@@ -421,6 +425,23 @@ class Decomp:
                     lbl = self.labels.get((tgt[0] << 16) | tgt[1]) if tgt else None
                     nm = lbl or ("sub_%02X%04X" % (tgt[0], tgt[1]) if tgt else "(*%s)" % regA)
                     call = "%s(%s)" % (nm, ", ".join(args))
+                # the mul32 record-pointer idiom: dp_00=idx, dp_04=stride/shift, dp_08=base, dp_0A=bank.
+                # render the pointer math (mul32_a linear, mul32_b = shift), and self-type known records.
+                if nm in ("mul32_a", "mul32_b") and 0x08 in dp_vals:
+                    idx = dp_vals.get(0x00, "dp_00"); base = dp_vals.get(0x08); stA = dp_vals.get(0x04, "?")
+                    try: bi = int(base, 16) if isinstance(base, str) and base.startswith("0x") else None
+                    except ValueError: bi = None
+                    if nm == "mul32_b":                 # stride arg is a shift count -> stride = 2**n
+                        try: sh = int(stA, 16); step = "%s << %d = *%d" % (idx, sh, 1 << sh)
+                        except (ValueError, TypeError): step = "%s << %s" % (idx, stA)
+                    else:
+                        step = "%s * %s" % (idx, stA)
+                    sname = BASE_TO_STRUCT[bi][0] if bi in BASE_TO_STRUCT else ("rec_%s" % base)
+                    call = "dp_00 = &%s[%s]" % (sname, idx)
+                    out.append(call + "; /* %s + (%s) */" % (base, step)); regA = "ret"; regA_type = None
+                    for _k in [k for k in ptype if k < 0x20]: del ptype[_k]
+                    if bi in BASE_TO_STRUCT: ptype[0x00] = BASE_TO_STRUCT[bi][1]
+                    i += 1; continue
                 out.append(call + ";"); regA = "ret"; regA_type = None
                 for _k in [k for k in ptype if k < 0x20]: del ptype[_k]  # calls clobber dp scratch <$20
                 _fm = RECORD_ACCESSORS.get(nm)          # accessor returns record ptr in dp_00
