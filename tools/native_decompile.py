@@ -31,17 +31,25 @@ import w65c816
 # (accessor = base + index*stride). Lets [dp],Y accesses self-label: dp_24[0x8] -> dp_24.output.
 FIEF_FIELDS = {0:"gold",2:"debt",4:"town",6:"rice",8:"output",10:"dams",12:"loyalty",
                14:"wealth",16:"men",18:"morale",20:"skill",22:"arms",24:"header"}
-RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS}   # the 26-byte fief/daimyo record
+# DaimyoRecord: byte fields, base $7E:2F79, stride 8 (rec_7E2F79 = mul32_b(id,3) = id<<3 = id*8).
+# WRAM-dump + on-screen oracle confirmed (Oda/Shingen/Kenshin elite; player = rolled char).
+DAIMYO_FIELDS = {0:"age",1:"health",2:"drive",3:"luck",4:"charisma",5:"intel"}
+RECORD_ACCESSORS = {"rec_7E33D5": FIEF_FIELDS, "rec_7E2F79": DAIMYO_FIELDS}
 RECORD_STRUCTS = {"rec_7E33D5": ("FiefRecord", 26,
-                  "fief/daimyo record; base $7E33D5, stride 26 (rec_7E33D5(idx))")}
+                  "fief record; base $7E33D5, stride 26 (rec_7E33D5, mul32_a linear)"),
+                  "rec_7E2F79": ("DaimyoRecord", 8,
+                  "daimyo attributes; base $7E2F79, stride 8 (rec_7E2F79, mul32_b shift-3=x8)")}
 
 def emit_struct_defs(out=sys.stdout):
     """Emit C typedefs for the known record layouts — the accessors return these."""
     for acc, fm in RECORD_ACCESSORS.items():
         nm, size, note = RECORD_STRUCTS.get(acc, (acc, 0, ""))
+        offs = sorted(fm)
+        gap = min((b - a for a, b in zip(offs, offs[1:])), default=2)   # 1 -> byte fields, 2 -> word
+        ctype = "uint8_t" if gap == 1 else "int16_t"
         out.write("typedef struct {  /* %d bytes; %s */\n" % (size, note))
-        for off in sorted(fm):
-            out.write("    int16_t %-8s /* +%d */\n" % (fm[off] + ";", off))
+        for off in offs:
+            out.write("    %-8s %-8s /* +%d */\n" % (ctype, fm[off] + ";", off))
         out.write("} %s;   /* returned by %s */\n\n" % (nm, acc))
 
 RET   = {"RTS", "RTL", "RTI", "STP"}
