@@ -40,8 +40,12 @@ RECORD_STRUCTS = {"rec_7E33D5": ("FiefRecord", 26,
                   "fief record; base $7E33D5, stride 26 (rec_7E33D5, mul32_a linear)"),
                   "rec_7E2F79": ("DaimyoRecord", 8,
                   "daimyo attributes; base $7E2F79, stride 8 (rec_7E2F79, mul32_b shift-3=x8)")}
-# base WRAM offset -> (struct name, field map) — so inline mul32 record computations self-type
-BASE_TO_STRUCT = {0x33D5: ("FiefRecord", FIEF_FIELDS), 0x2F79: ("DaimyoRecord", DAIMYO_FIELDS)}
+# PeakRecord: per-fief HIGH-WATER MARKS (max ever), base $7E:2005 stride 8 (mul32_b shift-3).
+# calc_fief_str keeps the max each fall; the RICE harvest reads peak.output * peak.dams% -> income
+# scales off the peak, not current (spike once, harvest forever). Confirmed via the fall-harvest walk.
+PEAK_FIELDS = {0:"output",2:"dams",4:"loyalty",6:"wealth"}
+BASE_TO_STRUCT = {0x33D5: ("FiefRecord", FIEF_FIELDS), 0x2F79: ("DaimyoRecord", DAIMYO_FIELDS),
+                  0x2005: ("PeakRecord", PEAK_FIELDS)}
 
 def emit_struct_defs(out=sys.stdout):
     """Emit C typedefs for the known record layouts — the accessors return these."""
